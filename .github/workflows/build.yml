@@ -1,0 +1,426 @@
+name: Build MyLinux ISO
+
+# Builds the MyLinux system and produces a bootable ISO file.
+# It starts by itself when this file is saved, and can also be started by hand
+# from the "Actions" tab (Run workflow).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev unzip rsync bc cpio file wget git python3 python3-setuptools libelf-dev libssl-dev
+
+      - name: Download Buildroot
+        run: git clone --depth 1 --branch 2026.02.x https://github.com/buildroot/buildroot.git
+
+      - name: Create the MyLinux files
+        run: |
+          cd buildroot
+          mkdir -p board/mylinux board/mylinux/overlay/etc/init.d board/mylinux/overlay/etc/mylinux board/mylinux/overlay/usr/share/mylinux configs
+          cat > board/mylinux/kernel.fragment <<'MYLINUX_END_0'
+          CONFIG_BLK_DEV_INITRD=y
+          CONFIG_RD_GZIP=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_ACPI=y
+          CONFIG_ACPI_BATTERY=y
+          CONFIG_ACPI_AC=y
+          CONFIG_ACPI_BUTTON=y
+          CONFIG_POWER_SUPPLY=y
+          CONFIG_INPUT_EVDEV=y
+          CONFIG_USB_SUPPORT=y
+          CONFIG_USB=y
+          CONFIG_USB_XHCI_HCD=y
+          CONFIG_USB_EHCI_HCD=y
+          CONFIG_USB_OHCI_HCD=y
+          CONFIG_USB_UHCI_HCD=y
+          CONFIG_HID=y
+          CONFIG_HID_GENERIC=y
+          CONFIG_USB_HID=y
+          CONFIG_FB=y
+          CONFIG_FB_VESA=y
+          CONFIG_FRAMEBUFFER_CONSOLE=y
+          CONFIG_WIRELESS=y
+          CONFIG_CFG80211=y
+          CONFIG_MAC80211=y
+          CONFIG_WLAN=y
+          CONFIG_WLAN_VENDOR_ATH=y
+          CONFIG_ATH9K=m
+          CONFIG_ATH9K_HTC=m
+          CONFIG_WLAN_VENDOR_INTEL=y
+          CONFIG_IWLWIFI=m
+          CONFIG_IWLDVM=m
+          CONFIG_IWLMVM=m
+          CONFIG_IWL3945=m
+          CONFIG_IWL4965=m
+          CONFIG_WLAN_VENDOR_BROADCOM=y
+          CONFIG_B43=m
+          CONFIG_BRCMSMAC=m
+          CONFIG_BRCMFMAC=m
+          CONFIG_WLAN_VENDOR_REALTEK=y
+          CONFIG_RTL8187=m
+          CONFIG_RTL8192CE=m
+          CONFIG_RTL8192CU=m
+          CONFIG_RTL8XXXU=m
+          CONFIG_WLAN_VENDOR_RALINK=y
+          CONFIG_RT2X00=m
+          CONFIG_RT2800PCI=m
+          CONFIG_RT2800USB=m
+          CONFIG_RT73USB=m
+          CONFIG_WLAN_VENDOR_MEDIATEK=y
+          CONFIG_MT7601U=m
+          MYLINUX_END_0
+          cat > board/mylinux/overlay/etc/init.d/S99desktop <<'MYLINUX_END_1'
+          #!/bin/sh
+          # Starts the graphical desktop (and restarts it if it ever stops)
+          case "$1" in
+            start)
+              export HOME=/root
+              mkdir -p /root /var/log
+              (
+                while true; do
+                  xinit /etc/mylinux/xinitrc -- /usr/bin/X :0 -nolisten tcp vt7 >/var/log/xinit.log 2>&1
+                  sleep 2
+                done
+              ) &
+              ;;
+            stop)
+              killall xinit 2>/dev/null
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          MYLINUX_END_1
+          cat > board/mylinux/overlay/etc/mylinux/xinitrc <<'MYLINUX_END_2'
+          #!/bin/sh
+          export HOME=/root
+          export GTK_THEME=Adwaita:dark
+          xsetroot -solid "#0b0f14"
+          setxkbmap -layout us,ara,fr -option grp:alt_shift_toggle 2>/dev/null
+          xset s off 2>/dev/null
+          xset -dpms 2>/dev/null
+          ( sleep 2; exec python3 /usr/share/mylinux/panel.py ) >/var/log/panel.log 2>&1 &
+          exec openbox
+          MYLINUX_END_2
+          cat > board/mylinux/overlay/usr/share/mylinux/panel.py <<'MYLINUX_END_3'
+          #!/usr/bin/env python3
+          # MyLinux panel: a simple bar at the bottom of the screen.
+          # Shows the menu, Wi-Fi, battery and clock. Black / white / cool blue.
+          import glob
+          import os
+          import subprocess
+          import time
+
+          import gi
+
+          gi.require_version("Gtk", "3.0")
+          gi.require_version("Gdk", "3.0")
+          from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+          NAME = "MyLinux"
+          PANEL_H = 44
+          THEME_FILE = os.path.expanduser("~/.config/mylinux-theme")
+
+          CSS = """
+          @define-color bg %(bg)s;
+          @define-color fg %(fg)s;
+          @define-color accent %(accent)s;
+          @define-color line %(line)s;
+          @define-color hover %(hover)s;
+
+          window#panel {
+              background-color: @bg;
+              color: @fg;
+              border-top: 1px solid @line;
+          }
+          window#panel label { color: @fg; font-size: 13px; }
+          window#panel label.dim { opacity: 0.75; }
+          window#panel button {
+              background: transparent;
+              background-image: none;
+              color: @fg;
+              border: none;
+              border-radius: 8px;
+              padding: 4px 14px;
+              box-shadow: none;
+              text-shadow: none;
+          }
+          window#panel button label { font-weight: bold; font-size: 14px; }
+          window#panel button:hover { background-color: @hover; }
+          window#panel button.brand label { color: @accent; }
+          menu, .menu, menuitem { background-color: @bg; color: @fg; }
+          menuitem:hover { background-color: @hover; }
+          menuitem label { color: @fg; }
+          """
+
+          THEMES = {
+              "dark": dict(bg="#0b0f14", fg="#e8edf2", accent="#4da3ff",
+                           line="#1c2733", hover="#16202b"),
+              "light": dict(bg="#f4f6f8", fg="#0b0f14", accent="#2f7de1",
+                            line="#d5dbe1", hover="#e3e8ee"),
+          }
+
+
+          def read(path):
+              try:
+                  with open(path) as f:
+                      return f.read().strip()
+              except OSError:
+                  return ""
+
+
+          def load_theme():
+              t = read(THEME_FILE)
+              return t if t in THEMES else "dark"
+
+
+          def save_theme(t):
+              try:
+                  os.makedirs(os.path.dirname(THEME_FILE), exist_ok=True)
+                  with open(THEME_FILE, "w") as f:
+                      f.write(t)
+              except OSError:
+                  pass
+
+
+          def battery_text():
+              for d in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+                  cap = read(d + "/capacity")
+                  status = read(d + "/status")
+                  if cap:
+                      extra = "  (charging)" if status == "Charging" else ""
+                      return "Battery %s%%%s" % (cap, extra)
+              return "AC power"
+
+
+          def wifi_text():
+              for net in sorted(glob.glob("/sys/class/net/*")):
+                  dev = os.path.basename(net)
+                  if not os.path.isdir(net + "/wireless"):
+                      continue
+                  try:
+                      out = subprocess.run(["iw", "dev", dev, "link"], capture_output=True,
+                                           text=True, timeout=3).stdout
+                  except Exception:
+                      out = ""
+                  for line in out.splitlines():
+                      line = line.strip()
+                      if line.startswith("SSID:"):
+                          return "Wi-Fi: " + line[5:].strip()
+                  return "Wi-Fi: not connected"
+              for net in sorted(glob.glob("/sys/class/net/eth*")) + sorted(glob.glob("/sys/class/net/en*")):
+                  if read(net + "/operstate") == "up":
+                      return "Ethernet"
+              return "No network"
+
+
+          class Panel(Gtk.Window):
+              def __init__(self):
+                  super().__init__(type=Gtk.WindowType.TOPLEVEL)
+                  self.set_name("panel")
+                  self.set_decorated(False)
+                  self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+                  self.set_skip_taskbar_hint(True)
+                  self.set_keep_above(True)
+                  self.stick()
+
+                  screen = Gdk.Screen.get_default()
+                  self.screen_w = screen.get_width()
+                  self.screen_h = screen.get_height()
+                  self.set_default_size(self.screen_w, PANEL_H)
+                  self.move(0, self.screen_h - PANEL_H)
+
+                  self.provider = Gtk.CssProvider()
+                  Gtk.StyleContext.add_provider_for_screen(
+                      screen, self.provider, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+                  self.theme = load_theme()
+                  self.apply_theme()
+
+                  box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+                  box.set_margin_start(10)
+                  box.set_margin_end(18)
+                  self.add(box)
+
+                  brand = Gtk.Button(label=NAME)
+                  brand.get_style_context().add_class("brand")
+                  brand.connect("clicked", self.show_menu)
+                  box.pack_start(brand, False, False, 0)
+
+                  self.clock = Gtk.Label()
+                  self.battery = Gtk.Label()
+                  self.wifi = Gtk.Label()
+                  for w in (self.clock, self.battery, self.wifi):
+                      box.pack_end(w, False, False, 0)
+
+                  self.menu = self.build_menu()
+                  self.refresh()
+                  GLib.timeout_add_seconds(5, self.refresh)
+
+              def apply_theme(self):
+                  self.provider.load_from_data((CSS % THEMES[self.theme]).encode())
+
+              def build_menu(self):
+                  menu = Gtk.Menu()
+                  items = [
+                      ("Terminal", lambda *_: subprocess.Popen(["xterm"])),
+                      ("Switch dark / light", self.toggle_theme),
+                      None,
+                      ("Restart", lambda *_: subprocess.Popen(["reboot"])),
+                      ("Shut down", lambda *_: subprocess.Popen(["poweroff"])),
+                  ]
+                  for it in items:
+                      if it is None:
+                          menu.append(Gtk.SeparatorMenuItem())
+                          continue
+                      mi = Gtk.MenuItem(label=it[0])
+                      mi.connect("activate", it[1])
+                      menu.append(mi)
+                  menu.show_all()
+                  return menu
+
+              def show_menu(self, button):
+                  self.menu.popup_at_widget(button, Gdk.Gravity.NORTH_WEST,
+                                            Gdk.Gravity.SOUTH_WEST, None)
+
+              def toggle_theme(self, *_):
+                  self.theme = "light" if self.theme == "dark" else "dark"
+                  save_theme(self.theme)
+                  self.apply_theme()
+
+              def refresh(self):
+                  self.clock.set_text(time.strftime("%H:%M"))
+                  self.battery.set_text(battery_text())
+                  self.wifi.set_text(wifi_text())
+                  return True
+
+
+          def main():
+              win = Panel()
+              win.connect("destroy", Gtk.main_quit)
+              win.show_all()
+              Gtk.main()
+
+
+          if __name__ == "__main__":
+              main()
+          MYLINUX_END_3
+          cat > board/mylinux/post-build.sh <<'MYLINUX_END_4'
+          #!/bin/sh
+          # Runs after the root filesystem is assembled. $1 = target directory.
+          TARGET_DIR="$1"
+          # Reserve space at the bottom of the screen for our panel
+          sed -i '/<margins>/,/<\/margins>/ s#<bottom>0</bottom>#<bottom>44</bottom>#' "$TARGET_DIR/etc/xdg/openbox/rc.xml"
+          chmod 755 "$TARGET_DIR/etc/init.d/S99desktop" "$TARGET_DIR/etc/mylinux/xinitrc" "$TARGET_DIR/usr/share/mylinux/panel.py"
+          MYLINUX_END_4
+          cat > configs/mylinux_defconfig <<'MYLINUX_END_5'
+          BR2_x86_i686=y
+          BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+          BR2_TOOLCHAIN_BUILDROOT_CXX=y
+          BR2_TARGET_GENERIC_HOSTNAME="mylinux"
+          BR2_TARGET_GENERIC_ISSUE="Welcome to MyLinux"
+          BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
+          BR2_SYSTEM_DHCP="eth0"
+          BR2_ROOTFS_OVERLAY="board/mylinux/overlay"
+          BR2_ROOTFS_POST_BUILD_SCRIPT="board/mylinux/post-build.sh"
+          BR2_LINUX_KERNEL=y
+          BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+          BR2_LINUX_KERNEL_DEFCONFIG="i386"
+          BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="board/mylinux/kernel.fragment"
+          BR2_LINUX_KERNEL_BZIMAGE=y
+          BR2_PACKAGE_LINUX_FIRMWARE=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_3945=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_4965=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_5000=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6000G2A=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6000G2B=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_100=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_1000=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_2000=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7260=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265D=y
+          BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8000C=y
+          BR2_PACKAGE_LINUX_FIRMWARE_ATHEROS_9170=y
+          BR2_PACKAGE_LINUX_FIRMWARE_ATHEROS_7010=y
+          BR2_PACKAGE_LINUX_FIRMWARE_ATHEROS_9271=y
+          BR2_PACKAGE_LINUX_FIRMWARE_BRCM_BCM43XX=y
+          BR2_PACKAGE_LINUX_FIRMWARE_BRCM_BCM43XXX=y
+          BR2_PACKAGE_LINUX_FIRMWARE_RTL_81XX=y
+          BR2_PACKAGE_LINUX_FIRMWARE_RTL_88XX=y
+          BR2_PACKAGE_LINUX_FIRMWARE_RALINK_RT2XX=y
+          BR2_PACKAGE_LINUX_FIRMWARE_RALINK_RT73=y
+          BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7601U=y
+          BR2_PACKAGE_DEJAVU=y
+          BR2_PACKAGE_ADWAITA_ICON_THEME=y
+          BR2_PACKAGE_HICOLOR_ICON_THEME=y
+          BR2_PACKAGE_LIBGTK3=y
+          BR2_PACKAGE_LIBGTK3_X11=y
+          BR2_PACKAGE_PYTHON3=y
+          BR2_PACKAGE_PYTHON_GOBJECT=y
+          BR2_PACKAGE_IW=y
+          BR2_PACKAGE_IWD=y
+          BR2_PACKAGE_ACPID=y
+          BR2_PACKAGE_XORG7=y
+          BR2_PACKAGE_XSERVER_XORG_SERVER=y
+          BR2_PACKAGE_XKEYBOARD_CONFIG=y
+          BR2_PACKAGE_XDRIVER_XF86_VIDEO_VESA=y
+          BR2_PACKAGE_XDRIVER_XF86_VIDEO_FBDEV=y
+          BR2_PACKAGE_XDRIVER_XF86_INPUT_LIBINPUT=y
+          BR2_PACKAGE_XAPP_XINIT=y
+          BR2_PACKAGE_XAPP_XSETROOT=y
+          BR2_PACKAGE_XAPP_SETXKBMAP=y
+          BR2_PACKAGE_XAPP_XSET=y
+          BR2_PACKAGE_XTERM=y
+          BR2_PACKAGE_OPENBOX=y
+          BR2_TARGET_ROOTFS_CPIO=y
+          BR2_TARGET_ROOTFS_CPIO_GZIP=y
+          BR2_TARGET_ROOTFS_ISO9660=y
+          BR2_TARGET_ROOTFS_ISO9660_ISOLINUX=y
+          BR2_TARGET_ROOTFS_ISO9660_HYBRID=y
+          BR2_TARGET_SYSLINUX=y
+          BR2_TARGET_SYSLINUX_LEGACY_BIOS=y
+          BR2_TARGET_SYSLINUX_ISOLINUX=y
+          MYLINUX_END_5
+          chmod +x board/mylinux/post-build.sh
+
+      - name: Build the system (takes 1 to 2 hours)
+        run: |
+          cd buildroot
+          make mylinux_defconfig
+          make -j"$(nproc)" 2>&1 | tee ../build.log | grep --line-buffered '^>>> ' || {
+            echo "=============== BUILD FAILED - last lines of the log ==============="
+            tail -n 80 ../build.log
+            exit 1
+          }
+
+      - name: Prepare the ISO
+        run: |
+          mkdir -p out
+          cp buildroot/output/images/rootfs.iso9660 out/mylinux.iso
+          ls -lh out
+
+      - name: Upload the ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: mylinux-iso
+          path: out/mylinux.iso
+          retention-days: 30
+
+      - name: Upload the log if the build failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
